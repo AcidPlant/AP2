@@ -254,3 +254,13 @@ failure handling
 idempotency
 It is simplified but follows real-world concepts
 
+Assignment 2 — gRPC Migration
+
+Repositories
+- **Proto Repository (Repo A):** https://github.com/YOUR_GITHUB_USERNAME/ap2-protos
+- **Generated Code Repository (Repo B):** https://github.com/YOUR_GITHUB_USERNAME/ap2-generated
+
+Architecture
+[Client] --REST--> [Order Service :8080] --gRPC--> [Payment Service :9091]
+                         |
+                   [gRPC Streaming :9090] <-- grpcurl / client script
