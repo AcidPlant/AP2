@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 
+	"payment-service/internal/middleware"
 	"payment-service/internal/repository"
 	transportgrpc "payment-service/internal/transport/grpc"
 	transporthttp "payment-service/internal/transport/http"
@@ -40,10 +41,12 @@ func main() {
 	grpcPort := getEnv("GRPC_PORT", "9091")
 	lis, err := net.Listen("tcp", ":"+grpcPort)
 	if err != nil {
-		log.Fatalf("failed to listen on grpc port: %v", err)
+		log.Fatalf("listen grpc: %v", err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.UnaryInterceptor(middleware.UnaryLoggingInterceptor),
+	)
 	paymentv1.RegisterPaymentServiceServer(grpcServer, transportgrpc.NewPaymentGRPCServer(paymentUC))
 
 	go func() {
