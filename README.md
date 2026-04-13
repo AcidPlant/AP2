@@ -260,7 +260,8 @@ Repositories
 - **Proto Repository (Repo A):** https://github.com/AcidPlant/Proto
 - **Generated Code Repository (Repo B):** https://github.com/AcidPlant/generated-code
 
-###Architecture
+Architecture
 [Client] --REST--> [Order Service :8080] --gRPC--> [Payment Service :9091]
+                         
                          |
                    [gRPC Streaming :9090] <-- grpcurl / client script
