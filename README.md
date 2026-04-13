@@ -263,5 +263,5 @@ Repositories
 Architecture
 [Client] --REST--> [Order Service :8080] --gRPC--> [Payment Service :9091]
                          
-                         |
-                   [gRPC Streaming :9090] <-- grpcurl / client script
+                                    |
+                              [gRPC Streaming :9090] <-- grpcurl / client script
