@@ -3,9 +3,7 @@ package main
 import (
 	"database/sql"
 	"log"
-	"net/http"
 	"os"
-	"time"
 
 	"order-service/internal/client"
 	"order-service/internal/repository"
@@ -22,19 +20,25 @@ func main() {
 	if err != nil {
 		log.Fatalf("open db: %v", err)
 	}
-	defer db.Close()
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+
+		}
+	}(db)
 
 	if err := db.Ping(); err != nil {
 		log.Fatalf("ping db: %v", err)
 	}
 
-	paymentURL := getEnv("PAYMENT_SERVICE_URL", "http://localhost:8081")
+	// gRPC address for payment servic
+	paymentGRPCAddr := getEnv("PAYMENT_GRPC_ADDR", "localhost:9091")
 
-	// Custom HTTP client with 2-second timeout as required.
-	httpClient := &http.Client{Timeout: 2 * time.Second}
+	paymentClient, err := client.NewPaymentGRPCClient(paymentGRPCAddr)
+	if err != nil {
+		log.Fatalf("payment grpc client: %v", err)
+	}
 
-	// Manual Dependency Injection (Composition Root).
-	paymentClient := client.NewPaymentClient(paymentURL, httpClient)
 	orderRepo := repository.NewPostgresRepo(db)
 	orderUC := usecase.NewOrderUseCase(orderRepo, paymentClient)
 	handler := transporthttp.NewHandler(orderUC)
@@ -43,7 +47,7 @@ func main() {
 	handler.RegisterRoutes(r)
 
 	port := getEnv("PORT", "8080")
-	log.Printf("order-service listening on :%s", port)
+	log.Printf("order-service HTTP listening on :%s", port)
 	if err := r.Run(":" + port); err != nil {
 		log.Fatal(err)
 	}
