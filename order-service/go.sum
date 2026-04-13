@@ -1,3 +1,5 @@
+github.com/AcidPlant/generated-code v1.0.1 h1:D0cuSB4Tt8FiTZ6wiL1HrCcyabPZgkCdK+SzQvHDpkU=
+github.com/AcidPlant/generated-code v1.0.1/go.mod h1:F/H4nYP6PW5OA+782YZsSCmpa4MXQzSJ5JcPWcfrLqs=
 github.com/bytedance/gopkg v0.1.3 h1:TPBSwH8RsouGCBcMBktLt1AymVo2TVsBVCY4b6TnZ/M=
 github.com/bytedance/gopkg v0.1.3/go.mod h1:576VvJ+eJgyCzdjS+c4+77QF3p7ubbtiKARP3TxducM=
 github.com/bytedance/sonic v1.15.0 h1:/PXeWFaR5ElNcVE84U0dOHjiMHQOwNIx3K4ymzh/uSE=
