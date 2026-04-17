@@ -2,6 +2,7 @@ package grpc
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"payment-service/internal/usecase"
@@ -38,5 +39,37 @@ func (s *PaymentGRPCServer) ProcessPayment(ctx context.Context, req *paymentv1.P
 		TransactionId: payment.TransactionID,
 		Status:        payment.Status,
 		ProcessedAt:   timestamppb.New(time.Now().UTC()),
+	}, nil
+}
+
+func (s *PaymentGRPCServer) ListPayments(ctx context.Context, req *paymentv1.ListPaymentsRequest) (*paymentv1.ListPaymentsResponse, error) {
+	minAmt := req.GetMinAmount()
+	maxAmt := req.GetMaxAmount()
+
+	if minAmt < 0 || maxAmt < 0 {
+		return nil, status.Error(codes.InvalidArgument, "min_amount and max_amount must be non-negative")
+	}
+
+	payments, err := s.uc.ListPayments(ctx, minAmt, maxAmt)
+	if err != nil {
+		if errors.Is(err, usecase.ErrInvalidRange) {
+			return nil, status.Error(codes.InvalidArgument, "min_amount cannot be greater than max_amount")
+		}
+		return nil, status.Errorf(codes.Internal, "list payments: %v", err)
+	}
+
+	items := make([]*paymentv1.PaymentItem, 0, len(payments))
+	for _, p := range payments {
+		items = append(items, &paymentv1.PaymentItem{
+			Id:            p.ID,
+			OrderId:       p.OrderID,
+			TransactionId: p.TransactionID,
+			Amount:        p.Amount,
+			Status:        p.Status,
+		})
+	}
+
+	return &paymentv1.ListPaymentsResponse{
+		Payments: items,
 	}, nil
 }

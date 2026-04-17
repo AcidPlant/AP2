@@ -12,10 +12,12 @@ import (
 )
 
 var ErrNotFound = errors.New("payment not found")
+var ErrInvalidRange = errors.New("min_amount cannot be greater than max_amount")
 
 type PaymentUseCase interface {
 	Authorize(ctx context.Context, orderID string, amount int64) (*domain.Payment, error)
 	GetByOrderID(ctx context.Context, orderID string) (*domain.Payment, error)
+	ListPayments(ctx context.Context, min, max int64) ([]*domain.Payment, error)
 }
 
 type paymentUseCase struct {
@@ -27,7 +29,6 @@ func NewPaymentUseCase(repo repository.PaymentRepository) PaymentUseCase {
 }
 
 func (uc *paymentUseCase) Authorize(ctx context.Context, orderID string, amount int64) (*domain.Payment, error) {
-	// Business rule: amounts over MaxAmount are declined.
 	status := domain.StatusAuthorized
 	if amount > domain.MaxAmount {
 		status = domain.StatusDeclined
@@ -57,4 +58,11 @@ func (uc *paymentUseCase) GetByOrderID(ctx context.Context, orderID string) (*do
 		return nil, ErrNotFound
 	}
 	return p, nil
+}
+
+func (uc *paymentUseCase) ListPayments(ctx context.Context, min, max int64) ([]*domain.Payment, error) {
+	if min > 0 && max > 0 && min > max {
+		return nil, ErrInvalidRange
+	}
+	return uc.repo.FindByAmountRange(ctx, min, max)
 }

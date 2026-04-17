@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/reflection"
 )
 
 func main() {
@@ -27,7 +28,6 @@ func main() {
 	defer func(db *sql.DB) {
 		err := db.Close()
 		if err != nil {
-
 		}
 	}(db)
 
@@ -48,6 +48,8 @@ func main() {
 		grpc.UnaryInterceptor(middleware.UnaryLoggingInterceptor),
 	)
 	paymentv1.RegisterPaymentServiceServer(grpcServer, transportgrpc.NewPaymentGRPCServer(paymentUC))
+
+	reflection.Register(grpcServer)
 
 	go func() {
 		log.Printf("payment-service gRPC listening on :%s", grpcPort)
