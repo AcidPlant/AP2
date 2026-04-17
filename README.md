@@ -254,14 +254,460 @@ failure handling
 idempotency
 It is simplified but follows real-world concepts
 
-Assignment 2 — gRPC Migration
+# Assignment 2 — gRPC Migration
 
-Repositories
-- **Proto Repository (Repo A):** https://github.com/AcidPlant/Proto
-- **Generated Code Repository (Repo B):** https://github.com/AcidPlant/generated-code
+## Overview
 
-Architecture
-[Client] --REST--> [Order Service :8080] --gRPC--> [Payment Service :9091]
-                         
-                                    |
-                              [gRPC Streaming :9090] <-- grpcurl / client script
+This project consists of two microservices:
+
+* Order Service (port 8080, REST)
+* Payment Service (port 9091, gRPC)
+
+The Order Service is responsible for creating and managing orders.
+The Payment Service is responsible for processing payments.
+
+The Order Service communicates with the Payment Service using gRPC.
+Each service has its own PostgreSQL database, and there is no direct data sharing between them.
+
+---
+
+## Architecture
+
+### High-Level Flow
+
+```
+Client (REST)
+     |
+     v
+Order Service (:8080)
+     |
+     | gRPC (unary)
+     v
+Payment Service (:9091)
+
+Streaming:
+grpcurl / client ---> Payment Service (:9090)
+```
+
+---
+
+### Detailed Architecture
+
+```
+                        CLIENT (curl / Postman)
+                                  |
+                                  v
+                          REST API (:8080)
+                                  |
+                                  v
+
++------------------------------+
+|        ORDER SERVICE         |
+|------------------------------|
+| HTTP Handler                 |
+|      |                       |
+|      v                       |
+| OrderUseCase                 |
+|      |                       |
+|      v                       |
+| Repository                   |
+|      |                       |
+|      v                       |
+| orders_db (PostgreSQL)       |
+|                              |
+| gRPC Client ----------------------+
++------------------------------+    |
+                                    v
+                          +------------------------------+
+                          |      PAYMENT SERVICE         |
+                          |------------------------------|
+                          | gRPC Server (:9091)          |
+                          | (unary methods)              |
+                          |                              |
+                          | PaymentUseCase               |
+                          |      |                       |
+                          |      v                       |
+                          | Repository                  |
+                          |      |                       |
+                          |      v                       |
+                          | payments_db (PostgreSQL)    |
+                          |                              |
+                          | gRPC Streaming (:9090)       |
+                          +------------------------------+
+```
+
+---
+
+## Repositories
+
+Proto definitions:
+https://github.com/AcidPlant/Proto
+
+Generated gRPC code:
+https://github.com/AcidPlant/generated-code
+
+---
+
+## Communication
+
+The Order Service uses gRPC to communicate with the Payment Service.
+
+### Unary Call
+
+Used during order creation to process payment:
+
+```
+Order Service → PaymentService.ProcessPayment()
+```
+
+### Streaming
+
+Used to receive payment updates:
+
+```
+grpcurl → PaymentService.SubscribePayments()
+```
+
+---
+
+## Code Structure
+
+Each service follows a simplified clean architecture:
+
+```
+Handler → UseCase → Domain → Repository
+```
+
+* Handler: processes incoming HTTP or gRPC requests
+* UseCase: contains business logic
+* Domain: defines core data structures
+* Repository: handles database interaction
+
+The Order Service additionally includes a gRPC client for calling the Payment Service.
+
+---
+
+## Migration (HTTP → gRPC)
+
+Before migration:
+
+```
+Order Service → HTTP → Payment Service
+```
+
+After migration:
+
+```
+Order Service → gRPC → Payment Service
+```
+
+gRPC is used to improve performance, enforce strict contracts via proto files, and support streaming communication.
+
+---
+
+## Business Rules
+
+* Amount is stored as int64 (in cents)
+* Amount must be greater than 0
+* If amount > 100000, payment is declined
+
+Order statuses:
+
+* Pending
+* Paid
+* Failed
+* Cancelled
+
+---
+
+## Failure Handling
+
+If the Payment Service is unavailable:
+
+* Request timeout is 2 seconds
+* The order is still saved in the database
+* Order status is set to "Failed"
+* API returns HTTP 503
+
+The status "Failed" is used instead of "Pending" because the system attempted the payment but did not succeed.
+
+---
+
+## Idempotency
+
+Supported using the header:
+
+```
+Idempotency-Key: <key>
+```
+
+If the same request is repeated with the same key:
+
+* No duplicate order is created
+* The same response is returned
+
+This is implemented using a UNIQUE constraint in the database.
+
+---
+
+## Running the Project
+
+### Using Docker
+
+```
+docker-compose up --build
+```
+
+This starts:
+
+* both services
+* PostgreSQL databases
+* runs migrations
+
+---
+
+### Manual Run
+
+Terminal 1:
+
+```
+cd payment-service
+go mod tidy
+go run ./cmd/payment-service
+```
+
+Terminal 2:
+
+```
+cd order-service
+go mod tidy
+go run ./cmd/order-service
+```
+
+---
+
+## API Examples
+
+### Create Order
+
+```
+POST /orders
+```
+
+Request body:
+
+```
+{
+  "customer_id": "cust-1",
+  "item_name": "Laptop",
+  "amount": 50000
+}
+```
+
+Responses:
+
+* 201 — order created, status "Paid"
+* 400 — invalid request
+* 503 — payment service unavailable
+
+---
+
+### Get Order
+
+```
+GET /orders/{id}
+```
+
+---
+
+### Cancel Order
+
+```
+PATCH /orders/{id}/cancel
+```
+
+* 200 — success
+* 409 — already Paid or Cancelled
+* 404 — not found
+
+---
+
+### Get Payment
+
+```
+GET /payments/{order_id}
+```
+
+---
+
+## gRPC Testing
+
+### Unary Request
+
+```
+grpcurl -plaintext \
+  -d '{"order_id":"123","amount":50000}' \
+  localhost:9091 \
+  payment.PaymentService/ProcessPayment
+```
+
+---
+
+### Streaming Request
+
+```
+grpcurl -plaintext \
+  -d '{"order_id":"123"}' \
+  localhost:9090 \
+  payment.PaymentService/SubscribePayments
+```
+
+---
+
+## Notes
+
+This project demonstrates:
+
+* microservice separation with independent databases
+* clean architecture principles
+* gRPC communication (unary and streaming)
+* failure handling with timeouts
+* idempotency implementation
+
+The implementation is simplified but reflects common real-world patterns.
+
+If the same request is sent again with the same key:
+
+* no duplicate order is created
+* the same response is returned
+
+This is implemented using a UNIQUE constraint in the database.
+
+---
+
+## Running the Project
+
+### Using Docker
+
+```
+docker-compose up --build
+```
+
+This starts:
+
+* both services
+* PostgreSQL databases
+* migrations
+
+---
+
+### Manual запуск
+
+Terminal 1:
+
+```
+cd payment-service
+go mod tidy
+go run ./cmd/payment-service
+```
+
+Terminal 2:
+
+```
+cd order-service
+go mod tidy
+go run ./cmd/order-service
+```
+
+---
+
+## API Examples
+
+### Create Order
+
+```
+POST /orders
+```
+
+Body:
+
+```
+{
+  "customer_id": "cust-1",
+  "item_name": "Laptop",
+  "amount": 50000
+}
+```
+
+Responses:
+
+* 201 → Paid
+* 400 → invalid request
+* 503 → payment service unavailable
+
+---
+
+### Get Order
+
+```
+GET /orders/{id}
+```
+
+---
+
+### Cancel Order
+
+```
+PATCH /orders/{id}/cancel
+```
+
+* 200 → success
+* 409 → already Paid or Cancelled
+* 404 → not found
+
+---
+
+### Get Payment
+
+```
+GET /payments/{order_id}
+```
+
+---
+
+## gRPC Testing
+
+### Unary
+
+```
+grpcurl -plaintext \
+  -d '{"order_id":"123","amount":50000}' \
+  localhost:9091 \
+  payment.PaymentService/ProcessPayment
+```
+
+---
+
+### Streaming
+
+```
+grpcurl -plaintext \
+  -d '{"order_id":"123"}' \
+  localhost:9090 \
+  payment.PaymentService/SubscribePayments
+```
+
+---
+
+## Notes
+
+This project demonstrates:
+
+* basic microservice separation
+* clean architecture approach
+* gRPC communication (unary and streaming)
+* failure handling with timeouts
+* idempotency implementation
+
+The implementation is simplified but follows real-world concepts.
+
