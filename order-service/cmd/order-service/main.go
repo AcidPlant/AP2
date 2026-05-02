@@ -1,10 +1,16 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"log"
 	"net"
+	"net/http"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"order-service/internal/broker"
 	"order-service/internal/client"
@@ -67,11 +73,30 @@ func main() {
 	r := gin.Default()
 	handler.RegisterRoutes(r)
 
-	port := getEnv("PORT", "8080")
-	log.Printf("order-service HTTP listening on :%s", port)
-	if err := r.Run(":" + port); err != nil {
-		log.Fatal(err)
+	httpPort := getEnv("PORT", "8080")
+	srv := &http.Server{Addr: ":" + httpPort, Handler: r}
+
+	go func() {
+		log.Printf("order-service HTTP listening on :%s", httpPort)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("http serve: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("order-service: shutting down…")
+
+	grpcServer.GracefulStop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(ctx); err != nil {
+		log.Printf("http shutdown error: %v", err)
 	}
+
+	log.Println("order-service: stopped")
 }
 
 func getEnv(key, fallback string) string {

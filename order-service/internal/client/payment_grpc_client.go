@@ -8,11 +8,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
 
-// PaymentGRPCClient satisfies the PaymentClient interface defined in usecase.
-// The interface in order_usecase.go is UNCHANGED — only this delivery layer changes.
 type PaymentGRPCClient struct {
 	client paymentv1.PaymentServiceClient
 }
@@ -25,8 +24,10 @@ func NewPaymentGRPCClient(grpcAddr string) (*PaymentGRPCClient, error) {
 	return &PaymentGRPCClient{client: paymentv1.NewPaymentServiceClient(conn)}, nil
 }
 
-// Authorize satisfies the usecase.PaymentClient interface — signature is identical to before.
-func (c *PaymentGRPCClient) Authorize(ctx context.Context, orderID string, amount int64) (string, string, error) {
+func (c *PaymentGRPCClient) Authorize(ctx context.Context, orderID string, amount int64, customerEmail string) (string, string, error) {
+	md := metadata.Pairs("customer-email", customerEmail)
+	ctx = metadata.NewOutgoingContext(ctx, md)
+
 	resp, err := c.client.ProcessPayment(ctx, &paymentv1.PaymentRequest{
 		OrderId: orderID,
 		Amount:  amount,

@@ -17,7 +17,7 @@ func detachedContext() context.Context {
 }
 
 type PaymentClient interface {
-	Authorize(ctx context.Context, orderID string, amount int64) (transactionID string, status string, err error)
+	Authorize(ctx context.Context, orderID string, amount int64, customerEmail string) (transactionID string, status string, err error)
 }
 
 var (
@@ -28,7 +28,7 @@ var (
 )
 
 type OrderUseCase interface {
-	CreateOrder(ctx context.Context, customerID, itemName string, amount int64, idempotencyKey string) (*domain.Order, error)
+	CreateOrder(ctx context.Context, customerID, itemName string, amount int64, idempotencyKey, customerEmail string) (*domain.Order, error)
 	GetOrder(ctx context.Context, id string) (*domain.Order, error)
 	CancelOrder(ctx context.Context, id string) error
 }
@@ -42,7 +42,7 @@ func NewOrderUseCase(repo repository.OrderRepository, paymentClient PaymentClien
 	return &orderUseCase{repo: repo, paymentClient: paymentClient}
 }
 
-func (uc *orderUseCase) CreateOrder(ctx context.Context, customerID, itemName string, amount int64, idempotencyKey string) (*domain.Order, error) {
+func (uc *orderUseCase) CreateOrder(ctx context.Context, customerID, itemName string, amount int64, idempotencyKey, customerEmail string) (*domain.Order, error) {
 	if amount <= 0 {
 		return nil, ErrInvalidAmount
 	}
@@ -71,7 +71,7 @@ func (uc *orderUseCase) CreateOrder(ctx context.Context, customerID, itemName st
 		return nil, fmt.Errorf("save order: %w", err)
 	}
 
-	_, paymentStatus, err := uc.paymentClient.Authorize(ctx, order.ID, amount)
+	_, paymentStatus, err := uc.paymentClient.Authorize(ctx, order.ID, amount, customerEmail)
 	if err != nil {
 		_ = uc.repo.UpdateStatus(detachedContext(), order.ID, domain.StatusFailed)
 		return nil, ErrPaymentServiceUnavailable

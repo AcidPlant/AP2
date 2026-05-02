@@ -9,6 +9,7 @@ import (
 
 	paymentv1 "github.com/AcidPlant/generated-code/payment/v1"
 	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
@@ -30,7 +31,14 @@ func (s *PaymentGRPCServer) ProcessPayment(ctx context.Context, req *paymentv1.P
 		return nil, status.Error(codes.InvalidArgument, "amount must be greater than 0")
 	}
 
-	payment, err := s.uc.Authorize(ctx, req.GetOrderId(), req.GetAmount())
+	customerEmail := "user@example.com"
+	if md, ok := metadata.FromIncomingContext(ctx); ok {
+		if vals := md.Get("customer-email"); len(vals) > 0 && vals[0] != "" {
+			customerEmail = vals[0]
+		}
+	}
+
+	payment, err := s.uc.Authorize(ctx, req.GetOrderId(), req.GetAmount(), customerEmail)
 	if err != nil {
 		return nil, status.Errorf(codes.Internal, "authorize payment: %v", err)
 	}
@@ -69,7 +77,5 @@ func (s *PaymentGRPCServer) ListPayments(ctx context.Context, req *paymentv1.Lis
 		})
 	}
 
-	return &paymentv1.ListPaymentsResponse{
-		Payments: items,
-	}, nil
+	return &paymentv1.ListPaymentsResponse{Payments: items}, nil
 }

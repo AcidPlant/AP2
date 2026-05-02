@@ -21,12 +21,15 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/orders", h.CreateOrder)
 	r.GET("/orders/:id", h.GetOrder)
 	r.PATCH("/orders/:id/cancel", h.CancelOrder)
+	r.GET("/healthz", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
 }
 
 type createOrderRequest struct {
-	CustomerID string `json:"customer_id" binding:"required"`
-	ItemName   string `json:"item_name"   binding:"required"`
-	Amount     int64  `json:"amount"      binding:"required"`
+	CustomerID     string `json:"customer_id"     binding:"required"`
+	ItemName       string `json:"item_name"       binding:"required"`
+	Amount         int64  `json:"amount"          binding:"required"`
+	CustomerEmail  string `json:"customer_email"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 func (h *Handler) CreateOrder(c *gin.Context) {
@@ -37,8 +40,16 @@ func (h *Handler) CreateOrder(c *gin.Context) {
 	}
 
 	idempotencyKey := c.GetHeader("Idempotency-Key")
+	if idempotencyKey == "" {
+		idempotencyKey = req.IdempotencyKey
+	}
 
-	order, err := h.uc.CreateOrder(c.Request.Context(), req.CustomerID, req.ItemName, req.Amount, idempotencyKey)
+	customerEmail := req.CustomerEmail
+	if customerEmail == "" {
+		customerEmail = "user@example.com"
+	}
+
+	order, err := h.uc.CreateOrder(c.Request.Context(), req.CustomerID, req.ItemName, req.Amount, idempotencyKey, customerEmail)
 	if err != nil {
 		switch {
 		case errors.Is(err, usecase.ErrPaymentServiceUnavailable):

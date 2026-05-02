@@ -697,6 +697,133 @@ grpcurl -plaintext \
   payment.PaymentService/SubscribePayments
 ```
 
+# AP2 Assignment 3 — Event-Driven Architecture with RabbitMQ
+
+## Architecture Overview
+
+```
+┌─────────────────┐   HTTP      ┌──────────────────┐
+│   Order Service │ ──────────► │ Payment Service  │
+│   (port 8080)   │   gRPC      │   (port 8081)    │
+└────────┬────────┘             └────────┬─────────┘
+         │                               │  Publish JSON event
+         │                               │  (after DB commit)
+         ▼                               ▼
+  orders-db (PG)        ┌─────────────────────────────┐
+                         │         RabbitMQ            │
+                         │  Queue: payment.completed   │
+                         │  DLX:   payment.dlx         │
+                         │  DLQ:   payment.dead        │
+                         └────────────┬────────────────┘
+                                      │  Consume (manual ACK)
+                                      ▼
+                         ┌────────────────────────────┐
+                         │   Notification Service     │
+                         │   - Manual ACK             │
+                         │   - Idempotency (sync.Map) │
+                         │   - Graceful Shutdown      │
+                         └────────────────────────────┘
+```
+
+## How to Run
+
+```bash
+docker compose up --build
+```
+
+RabbitMQ Management UI: http://localhost:15672 (guest / guest)
+
+## Testing
+
+### Create an order (triggers full chain)
+```bash
+curl -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{
+    "customer_id":    "cust-001",
+    "item_name":      "Laptop",
+    "amount":         49999,
+    "customer_email": "alice@example.com",
+    "idempotency_key":"order-001"
+  }'
+```
+
+### Watch notification logs
+```bash
+docker logs -f notification-service
+# Expected: [Notification] Sent email to alice@example.com for Order #<id>. Amount: $499.99
+```
+
+### Test declined payment (amount > 100000 cents = $1000)
+```bash
+curl -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -d '{"customer_id":"c2","item_name":"Yacht","amount":999999,"customer_email":"bob@example.com"}'
+# No notification — declined payments are not published
+```
+
+---
+
+## Idempotency Strategy
+
+Each `PaymentEvent` carries a unique `event_id` (UUID). The Notification Service keeps an in-memory `sync.Map` keyed by `event_id`.
+
+```
+Handle(body):
+  1. Parse JSON → PaymentEvent
+  2. MarkSeen(event.EventID) → duplicate? ACK and return immediately
+  3. Log the email simulation
+  4. Return nil → consumer ACKs the message
+```
+
+This prevents duplicate email logs even when RabbitMQ re-delivers a message after a consumer crash.
+
+## Manual ACK Logic
+
+Auto-ack is **disabled**. The consumer:
+- Sends `msg.Ack(false)` only after `Handle()` succeeds (returns nil)
+- Sends `msg.Nack(false, false)` on error — no requeue, so RabbitMQ routes to DLQ after 3 attempts (`x-delivery-limit: 3`)
+
+This achieves **at-least-once delivery**: a crash before ACK causes re-delivery.
+
+## Dead Letter Queue (Bonus)
+
+| Resource | Type | Role |
+|---|---|---|
+| `payment.completed` | durable queue | main work queue |
+| `payment.dlx` | fanout exchange | dead-letter exchange |
+| `payment.dead` | durable queue | receives permanently-failed messages |
+
+To demonstrate: change `handler.Handle()` to return an error, rebuild, and watch `payment.dead` fill up in the RabbitMQ UI.
+
+## Graceful Shutdown
+
+Both services use `os/signal.Notify(quit, SIGINT, SIGTERM)`:
+- **Payment Service**: `grpcServer.GracefulStop()` + `http.Server.Shutdown(ctx)` then closes RabbitMQ channel
+- **Notification Service**: cancels the consumer `context.Context`, exits the consume loop, `defer c.Close()` releases AMQP resources
+
+## Queue Durability
+
+All queues/exchanges declared `durable: true`. Messages published with `DeliveryMode: amqp.Persistent`. Messages survive broker restarts.
+
+## Project Structure
+
+```
+.
+├── docker-compose.yml
+├── README.md
+├── order-service/          (Assignment 2 — unchanged)
+├── payment-service/        (Assignment 2 + broker/publisher added)
+│   └── internal/broker/
+│       ├── publisher.go         ← interface
+│       └── rabbitmq_publisher.go
+└── notification-service/   (NEW — Assignment 3)
+    └── internal/
+        ├── consumer/rabbitmq_consumer.go
+        ├── handler/notification_handler.go
+        └── idempotency/store.go
+```
+
 ---
 
 ## Notes
