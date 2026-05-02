@@ -71,6 +71,7 @@ func New(url string, h *handler.NotificationHandler) (*RabbitMQConsumer, error) 
 		false,
 		false,
 		amqp.Table{
+			"x-queue-type":           "quorum",
 			"x-dead-letter-exchange": DLXName,
 			"x-delivery-limit":       int32(3),
 		},
