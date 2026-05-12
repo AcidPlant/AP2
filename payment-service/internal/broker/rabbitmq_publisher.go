@@ -60,16 +60,14 @@ func NewRabbitMQPublisher(url string) (*RabbitMQPublisher, error) {
 	}
 
 	if _, err := ch.QueueDeclare(
-		QueueName,
+		DLQName,
 		true,
 		false,
 		false,
 		false,
-		amqp.Table{
-			"x-dead-letter-exchange": DLXName,
-		},
+		nil,
 	); err != nil {
-		return nil, fmt.Errorf("declare queue: %w", err)
+		return nil, fmt.Errorf("declare dlq: %w", err)
 	}
 
 	if err := ch.QueueBind(DLQName, "", DLXName, false, nil); err != nil {
@@ -83,9 +81,7 @@ func NewRabbitMQPublisher(url string) (*RabbitMQPublisher, error) {
 		false,
 		false,
 		amqp.Table{
-			"x-queue-type":           "quorum",
 			"x-dead-letter-exchange": DLXName,
-			"x-delivery-limit":       int32(3),
 		},
 	); err != nil {
 		return nil, fmt.Errorf("declare queue: %w", err)
