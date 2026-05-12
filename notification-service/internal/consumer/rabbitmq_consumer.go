@@ -2,11 +2,12 @@ package consumer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
 
-	"notification-service/internal/handler"
+	"notification-service/internal/worker"
 
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -20,10 +21,10 @@ const (
 type RabbitMQConsumer struct {
 	conn    *amqp.Connection
 	channel *amqp.Channel
-	handler *handler.NotificationHandler
+	w       *worker.NotificationWorker
 }
 
-func New(url string, h *handler.NotificationHandler) (*RabbitMQConsumer, error) {
+func New(url string, w *worker.NotificationWorker) (*RabbitMQConsumer, error) {
 	var conn *amqp.Connection
 	var err error
 
@@ -55,44 +56,28 @@ func New(url string, h *handler.NotificationHandler) (*RabbitMQConsumer, error) 
 	if err := ch.ExchangeDeclare(DLXName, "fanout", true, false, false, false, nil); err != nil {
 		return nil, fmt.Errorf("declare dlx: %w", err)
 	}
-
 	if _, err := ch.QueueDeclare(DLQName, true, false, false, false, nil); err != nil {
 		return nil, fmt.Errorf("declare dlq: %w", err)
 	}
-
 	if err := ch.QueueBind(DLQName, "", DLXName, false, nil); err != nil {
 		return nil, fmt.Errorf("bind dlq: %w", err)
 	}
 
 	if _, err := ch.QueueDeclare(
-		QueueName,
-		true,
-		false,
-		false,
-		false,
+		QueueName, true, false, false, false,
 		amqp.Table{
-			"x-queue-type":           "quorum",
 			"x-dead-letter-exchange": DLXName,
-			"x-delivery-limit":       int32(3),
 		},
 	); err != nil {
 		return nil, fmt.Errorf("declare queue: %w", err)
 	}
 
 	log.Printf("[Consumer] connected – queue=%s dlq=%s", QueueName, DLQName)
-	return &RabbitMQConsumer{conn: conn, channel: ch, handler: h}, nil
+	return &RabbitMQConsumer{conn: conn, channel: ch, w: w}, nil
 }
 
 func (c *RabbitMQConsumer) Consume(ctx context.Context) error {
-	msgs, err := c.channel.Consume(
-		QueueName,
-		"notification-consumer",
-		false,
-		false,
-		false,
-		false,
-		nil,
-	)
+	msgs, err := c.channel.Consume(QueueName, "notification-consumer", false, false, false, false, nil)
 	if err != nil {
 		return fmt.Errorf("consume: %w", err)
 	}
@@ -111,11 +96,17 @@ func (c *RabbitMQConsumer) Consume(ctx context.Context) error {
 				return nil
 			}
 
-			if err := c.handler.Handle(msg.Body); err != nil {
-				log.Printf("[Consumer] NACK message_id=%s err=%v", msg.MessageId, err)
+			var event worker.PaymentEvent
+			if err := json.Unmarshal(msg.Body, &event); err != nil {
+				log.Printf("[Consumer] malformed message, discarding: %v", err)
+				_ = msg.Ack(false)
+				continue
+			}
+
+			if err := c.w.Process(ctx, event); err != nil {
+				log.Printf("[Consumer] NACK event=%s: %v", event.EventID, err)
 				_ = msg.Nack(false, false)
 			} else {
-				log.Printf("[Consumer] ACK  message_id=%s", msg.MessageId)
 				_ = msg.Ack(false)
 			}
 		}

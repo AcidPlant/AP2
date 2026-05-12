@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,21 +18,24 @@ type PaymentEvent struct {
 }
 
 type NotificationHandler struct {
-	idem *idempotency.Store
+	idem *idempotency.RedisStore
 }
 
-func New(idem *idempotency.Store) *NotificationHandler {
+func New(idem *idempotency.RedisStore) *NotificationHandler {
 	return &NotificationHandler{idem: idem}
 }
 
-func (h *NotificationHandler) Handle(body []byte) error {
+func (h *NotificationHandler) Handle(ctx context.Context, body []byte) error {
 	var event PaymentEvent
 	if err := json.Unmarshal(body, &event); err != nil {
 		log.Printf("[Notification] WARN: malformed message, skipping: %v", err)
 		return nil
 	}
 
-	if h.idem.MarkSeen(event.EventID) {
+	acquired, err := h.idem.TryAcquire(ctx, event.EventID)
+	if err != nil {
+		log.Printf("[Notification] WARN idempotency check failed: %v – proceeding", err)
+	} else if !acquired {
 		log.Printf("[Notification] DUPLICATE event_id=%s – skipping", event.EventID)
 		return nil
 	}
@@ -40,5 +44,6 @@ func (h *NotificationHandler) Handle(body []byte) error {
 	log.Printf("[Notification] Sent email to %s for Order #%s. Amount: %s",
 		event.CustomerEmail, event.OrderID, dollars)
 
+	_ = h.idem.MarkDone(ctx, event.EventID)
 	return nil
 }

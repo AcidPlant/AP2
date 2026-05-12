@@ -824,7 +824,284 @@ All queues/exchanges declared `durable: true`. Messages published with `Delivery
         └── idempotency/store.go
 ```
 
+
 ---
+
+
+AP2 Assignment 4 – Performance Optimization & External Integrations
+Overview
+---
+Architecture
+```
+┌────────────────────────────────────────────────────────────────────┐
+│                        CLIENT (curl / Postman)                     │
+└───────────────────────────────┬────────────────────────────────────┘
+                                │  HTTP
+                                ▼
+┌───────────────────────────────────────────────────────┐
+│                    ORDER SERVICE :8080                │
+│                                                       │
+│  RateLimiterMiddleware ──► Handler                    │
+│            (Redis)              │                     │
+│                                 ▼                     │
+│                         OrderUseCase                  │
+│                        /           \                  │
+│               ┌────────┐       ┌────────┐             │
+│               │  Redis │       │Postgres│             │
+│               │ Cache  │       │  (DB)  │             │
+│               └────────┘       └────────┘             │
+│         Cache-aside read:                             │
+│           1. Check Redis → HIT → return               │
+│           2. MISS → read DB → SET Redis → return      │
+│         Cache invalidation:                           │
+│           UpdateStatus → DEL Redis key (atomic)       │
+│                                                       │
+│               │  gRPC Authorize                       │
+│               ▼                                       │
+└───────────────────────────────────────────────────────┘
+                │
+                ▼
+┌───────────────────────────────────────────────────────┐
+│                  PAYMENT SERVICE :8081                │
+│                                                       │
+│  gRPC Server → PaymentUseCase → Postgres              │
+│                     │                                 │
+│                     │  Publish event (async)          │
+│                     ▼                                 │
+│              RabbitMQ Publisher                       │
+│          (queue: payment.completed)                   │
+└───────────────────────────────────────────────────────┘
+                │
+                │  AMQP message
+                ▼
+┌───────────────────────────────────────────────────────┐
+│              NOTIFICATION SERVICE (worker)            │
+│                                                       │
+│  RabbitMQConsumer → NotificationWorker                │
+│                            │                          │
+│            ┌───────────────┼──────────────────┐       │
+│            │               │                  │       │
+│            ▼               ▼                  ▼       │
+│     Redis Idempotency  Exponential       Provider     │
+│        Store           Backoff          Interface     │
+│     (SetNX / MarkDone) (2s→4s→8s→16s) /           \  │
+│                                  MockProvider  SMTP  │
+│                                  (simulated)  (real) │
+│                                                       │
+│  On success → MarkDone in Redis → ACK message        │
+│  On failure → retry with backoff → NACK → DLQ        │
+└───────────────────────────────────────────────────────┘
+```
+Redis Usage Map
+```
+Key pattern               Service       Purpose
+─────────────────────     ────────────  ────────────────────────────────────
+order:<id>                order-svc     Cache-aside order data (TTL 5 min)
+rate_limit:<ip>           order-svc     Request counter for rate limiter
+notif:idem:<eventID>      notif-svc     Idempotency state (processing/done)
+```
+---
+Caching Strategy (Order Service)
+Pattern: Cache-Aside (Lazy Loading)
+The Cache-Aside pattern was chosen because:
+Orders are read far more often than written.
+We only cache entries that are actually requested, keeping Redis memory lean.
+The application (not Redis) owns the invalidation logic, giving us full control.
+Read Path (`GET /orders/:id`)
+```
+Request
+  │
+  ├─► Redis GET order:<id>
+  │       ├─ HIT  → return immediately (no DB call)
+  │       └─ MISS ─► Postgres SELECT
+  │                       │
+  │                       └─► Redis SET order:<id>  TTL=5min
+  │                               │
+  └───────────────────────────────┘
+                  Response
+```
+Write / Invalidation Path
+```
+CreateOrder / UpdateStatus / CancelOrder
+  │
+  ├─► Postgres UPDATE orders SET status = ...
+  │
+  └─► Redis DEL order:<id>   ← atomic invalidation
+```
+Why DEL instead of SET?
+Deleting the key is safer than overwriting it because:
+It avoids stale-read races between two concurrent writers.
+The next read will fetch the freshest data from Postgres and re-populate the
+cache with the correct TTL.
+TTL
+Default is 300 seconds (5 minutes), configurable via `CACHE_TTL_SECONDS`.
+The TTL acts as a safety net: even if invalidation somehow misses (e.g. a crash
+between the DB write and the DEL call), the cache auto-expires within the window.
+---
+Retry & Backoff Strategy (Notification Service)
+Exponential Backoff
+```
+Attempt 1  → send immediately
+Attempt 2  → wait 2 s  then send
+Attempt 3  → wait 4 s  then send
+Attempt 4  → wait 8 s  then send
+...capped at RETRY_MAX_DELAY_MS (default 30 s)
+```
+Formula: `delay = min(BaseDelay × 2^(attempt-1), MaxDelay)`
+Configured via environment variables:
+Variable	Default	Meaning
+`RETRY_MAX_ATTEMPTS`	`4`	Total attempts (1 initial + 3 retries)
+`RETRY_BASE_DELAY_MS`	`2000`	First retry wait
+`RETRY_MAX_DELAY_MS`	`30000`	Maximum wait cap
+Idempotency
+Redis is used as a distributed idempotency store. Each payment event has a unique
+`event_id`. The flow:
+```
+TryAcquire(eventID)
+  │
+  ├─ SetNX "notif:idem:<id>" = "processing"  TTL=24h
+  │
+  ├─ OK (new key)    → proceed to send
+  └─ Already exists
+       ├─ value = "done"       → skip (already delivered)
+       └─ value = "processing" → re-acquire (previous crash recovery)
+
+After successful send:
+  Set "notif:idem:<id>" = "done"
+```
+This prevents:
+Duplicate emails – same eventID won't be processed twice.
+Lost notifications – a "processing" state from a crashed worker is
+re-acquired on the next attempt.
+---
+Adapter Pattern (Provider)
+```go
+// The interface – only this lives in the worker
+type NotificationProvider interface {
+    Send(ctx context.Context, n Notification) error
+}
+
+// Concrete adapters
+MockProvider  – PROVIDER_MODE=SIMULATED (default)
+SMTPProvider  – PROVIDER_MODE=REAL
+```
+Switching providers requires only an environment variable change – zero code
+changes to the business logic.
+---
+Rate Limiter (Bonus)
+A middleware in `order-service/internal/middleware/rate_limiter.go` limits each
+client (by IP) to N requests per time window using a Redis counter:
+```
+INCR rate_limit:<ip>     (atomic)
+EXPIRE rate_limit:<ip>   <window>
+
+if counter > limit:
+    HTTP 429  +  Retry-After header
+```
+Configure via `.env`:
+```
+RATE_LIMIT_REQUESTS=10
+RATE_LIMIT_WINDOW_SECONDS=60
+```
+---
+Running the Project
+Prerequisites
+Docker & Docker Compose
+Start everything
+```bash
+docker compose up --build
+```
+Verify services
+Service	URL
+Order Service HTTP	http://localhost:8080
+Payment Service HTTP	http://localhost:8081
+RabbitMQ Management	http://localhost:15672 (guest/guest)
+Redis CLI	`docker compose exec redis redis-cli`
+Example API calls
+```bash
+# Create an order (triggers payment + notification)
+curl -X POST http://localhost:8080/orders \
+  -H "Content-Type: application/json" \
+  -H "Idempotency-Key: order-key-001" \
+  -d '{"customer_id":"cust-1","item_name":"Widget","amount":4999,"customer_email":"alice@example.com"}'
+
+# Get order – first call hits DB, second call hits cache
+ORDER_ID="<id from above>"
+curl http://localhost:8080/orders/$ORDER_ID
+
+# Cancel order (also invalidates cache)
+curl -X PATCH http://localhost:8080/orders/$ORDER_ID/cancel
+
+# Inspect Redis cache
+docker compose exec redis redis-cli KEYS "order:*"
+docker compose exec redis redis-cli TTL "order:$ORDER_ID"
+
+# Inspect idempotency keys
+docker compose exec redis redis-cli KEYS "notif:idem:*"
+
+# Trigger rate limiter (send > 10 requests in 60 seconds)
+for i in $(seq 1 12); do curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/healthz; done
+```
+Switch to real SMTP
+```bash
+# In notification-service/.env:
+PROVIDER_MODE=REAL
+SMTP_HOST=smtp.mailjet.com
+SMTP_PORT=587
+SMTP_USER=<mailjet_api_key>
+SMTP_PASSWORD=<mailjet_secret>
+EMAIL_FROM=noreply@yourdomain.com
+
+docker compose up --build notification-service
+```
+
+
+Final Project Structure
+```
+AP2_Assignment4/
+├── docker-compose.yml
+│
+├── order-service/
+│   ├── cmd/order-service/main.go       ← wires Redis + rate limiter
+│   ├── internal/
+│   │   ├── cache/redis_cache.go        ← NEW: Cache-Aside implementation
+│   │   ├── middleware/rate_limiter.go  ← NEW: Redis rate limiter (BONUS)
+│   │   ├── usecase/order_usecase.go    ← UPDATED: uses cache interface
+│   │   ├── transport/http/handler.go
+│   │   ├── repository/order_repo.go
+│   │   ├── domain/order.go
+│   │   ├── broker/order_broker.go
+│   │   └── client/payment_grpc_client.go
+│   ├── migrations/
+│   ├── .env
+│   ├── Dockerfile
+│   └── go.mod
+│
+├── notification-service/
+│   ├── cmd/notification-service/main.go   ← wires provider via PROVIDER_MODE
+│   ├── internal/
+│   │   ├── provider/
+│   │   │   ├── provider.go             ← NEW: NotificationProvider interface
+│   │   │   ├── mock_provider.go        ← NEW: simulated adapter
+│   │   │   └── smtp_provider.go        ← NEW: real SMTP adapter
+│   │   ├── idempotency/redis_store.go  ← NEW: Redis-backed idempotency
+│   │   ├── worker/notification_worker.go ← NEW: retry + backoff engine
+│   │   └── consumer/rabbitmq_consumer.go ← UPDATED: uses worker
+│   ├── .env
+│   ├── Dockerfile
+│   └── go.mod
+│
+└── payment-service/                       ← unchanged from Assignment 3
+    ├── cmd/payment-service/main.go
+    ├── internal/...
+    ├── migrations/
+    ├── .env
+    ├── Dockerfile
+    └── go.mod
+```
+---
+
+
 
 ## Notes
 

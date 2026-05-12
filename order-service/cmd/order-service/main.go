@@ -9,11 +9,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"order-service/internal/broker"
+	"order-service/internal/cache"
 	"order-service/internal/client"
+	"order-service/internal/middleware"
 	"order-service/internal/repository"
 	transportgrpc "order-service/internal/transport/grpc"
 	transporthttp "order-service/internal/transport/http"
@@ -22,6 +25,7 @@ import (
 	orderv1 "github.com/AcidPlant/generated-code/order/v1"
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
 )
 
@@ -42,6 +46,25 @@ func main() {
 		log.Fatalf("ping db: %v", err)
 	}
 
+	redisAddr := getEnv("REDIS_ADDR", "localhost:6379")
+	rdb := redis.NewClient(&redis.Options{
+		Addr: redisAddr,
+	})
+
+	ctx := context.Background()
+	if err := rdb.Ping(ctx).Err(); err != nil {
+		log.Printf("[WARN] redis unavailable at %s: %v – caching disabled", redisAddr, err)
+		rdb = nil
+	} else {
+		log.Printf("Redis connected at %s", redisAddr)
+	}
+
+	cacheTTLSec, _ := strconv.Atoi(getEnv("CACHE_TTL_SECONDS", "300"))
+	var orderCache cache.OrderCache
+	if rdb != nil {
+		orderCache = cache.NewRedisOrderCache(rdb, time.Duration(cacheTTLSec)*time.Second)
+	}
+
 	paymentGRPCAddr := getEnv("PAYMENT_GRPC_ADDR", "localhost:9091")
 	paymentClient, err := client.NewPaymentGRPCClient(paymentGRPCAddr)
 	if err != nil {
@@ -49,7 +72,7 @@ func main() {
 	}
 
 	orderRepo := repository.NewPostgresRepo(db)
-	orderUC := usecase.NewOrderUseCase(orderRepo, paymentClient)
+	orderUC := usecase.NewOrderUseCase(orderRepo, paymentClient, orderCache)
 
 	orderBroker := broker.NewOrderBroker()
 	go orderBroker.ListenAndForward(dsn)
@@ -69,8 +92,19 @@ func main() {
 		}
 	}()
 
-	handler := transporthttp.NewHandler(orderUC)
 	r := gin.Default()
+
+	if rdb != nil {
+		maxReq, _ := strconv.Atoi(getEnv("RATE_LIMIT_REQUESTS", "10"))
+		windowSec, _ := strconv.Atoi(getEnv("RATE_LIMIT_WINDOW_SECONDS", "60"))
+		r.Use(middleware.RateLimiter(rdb, middleware.RateLimiterConfig{
+			MaxRequests: maxReq,
+			Window:      time.Duration(windowSec) * time.Second,
+		}))
+		log.Printf("Rate limiter enabled: %d req / %ds", maxReq, windowSec)
+	}
+
+	handler := transporthttp.NewHandler(orderUC)
 	handler.RegisterRoutes(r)
 
 	httpPort := getEnv("PORT", "8080")
@@ -90,10 +124,14 @@ func main() {
 
 	grpcServer.GracefulStop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(ctx); err != nil {
+	if err := srv.Shutdown(shutCtx); err != nil {
 		log.Printf("http shutdown error: %v", err)
+	}
+
+	if rdb != nil {
+		_ = rdb.Close()
 	}
 
 	log.Println("order-service: stopped")

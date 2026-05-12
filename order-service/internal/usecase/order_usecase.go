@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"time"
 
+	"order-service/internal/cache"
 	"order-service/internal/domain"
 	"order-service/internal/repository"
 
@@ -36,10 +38,11 @@ type OrderUseCase interface {
 type orderUseCase struct {
 	repo          repository.OrderRepository
 	paymentClient PaymentClient
+	cache         cache.OrderCache // may be nil if Redis is unavailable
 }
 
-func NewOrderUseCase(repo repository.OrderRepository, paymentClient PaymentClient) OrderUseCase {
-	return &orderUseCase{repo: repo, paymentClient: paymentClient}
+func NewOrderUseCase(repo repository.OrderRepository, paymentClient PaymentClient, c cache.OrderCache) OrderUseCase {
+	return &orderUseCase{repo: repo, paymentClient: paymentClient, cache: c}
 }
 
 func (uc *orderUseCase) CreateOrder(ctx context.Context, customerID, itemName string, amount int64, idempotencyKey, customerEmail string) (*domain.Order, error) {
@@ -74,6 +77,7 @@ func (uc *orderUseCase) CreateOrder(ctx context.Context, customerID, itemName st
 	_, paymentStatus, err := uc.paymentClient.Authorize(ctx, order.ID, amount, customerEmail)
 	if err != nil {
 		_ = uc.repo.UpdateStatus(detachedContext(), order.ID, domain.StatusFailed)
+		uc.deleteFromCache(detachedContext(), order.ID)
 		return nil, ErrPaymentServiceUnavailable
 	}
 
@@ -86,10 +90,25 @@ func (uc *orderUseCase) CreateOrder(ctx context.Context, customerID, itemName st
 		return nil, fmt.Errorf("update order status: %w", err)
 	}
 	order.Status = newStatus
+
+	uc.setInCache(ctx, order)
+
 	return order, nil
 }
 
 func (uc *orderUseCase) GetOrder(ctx context.Context, id string) (*domain.Order, error) {
+	if uc.cache != nil {
+		cached, err := uc.cache.Get(ctx, id)
+		if err != nil {
+			log.Printf("[Cache] WARN get order:%s – %v", id, err)
+		} else if cached != nil {
+			log.Printf("[Cache] HIT  order:%s", id)
+			return cached, nil
+		} else {
+			log.Printf("[Cache] MISS order:%s – fetching from DB", id)
+		}
+	}
+
 	order, err := uc.repo.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -97,6 +116,9 @@ func (uc *orderUseCase) GetOrder(ctx context.Context, id string) (*domain.Order,
 	if order == nil {
 		return nil, ErrNotFound
 	}
+
+	uc.setInCache(ctx, order)
+
 	return order, nil
 }
 
@@ -111,5 +133,30 @@ func (uc *orderUseCase) CancelOrder(ctx context.Context, id string) error {
 	if order.Status != domain.StatusPending {
 		return ErrCannotCancel
 	}
-	return uc.repo.UpdateStatus(ctx, id, domain.StatusCancelled)
+
+	if err := uc.repo.UpdateStatus(ctx, id, domain.StatusCancelled); err != nil {
+		return err
+	}
+
+	uc.deleteFromCache(ctx, id)
+
+	return nil
+}
+
+func (uc *orderUseCase) setInCache(ctx context.Context, order *domain.Order) {
+	if uc.cache == nil {
+		return
+	}
+	if err := uc.cache.Set(ctx, order); err != nil {
+		log.Printf("[Cache] WARN set order:%s – %v", order.ID, err)
+	}
+}
+
+func (uc *orderUseCase) deleteFromCache(ctx context.Context, id string) {
+	if uc.cache == nil {
+		return
+	}
+	if err := uc.cache.Delete(ctx, id); err != nil {
+		log.Printf("[Cache] WARN del order:%s – %v", id, err)
+	}
 }

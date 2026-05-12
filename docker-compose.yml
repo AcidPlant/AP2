@@ -1,0 +1,120 @@
+version: "3.9"
+
+services:
+  postgres-orders:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: orders_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "123"
+    volumes:
+      - orders_data:/var/lib/postgresql/data
+      - ./order-service/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-payments:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: payments_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "123"
+    volumes:
+      - payments_data:/var/lib/postgresql/data
+      - ./payment-service/migrations:/docker-entrypoint-initdb.d
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"    # management UI
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --save 60 1 --loglevel warning
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+
+  payment-service:
+    build:
+      context: ./payment-service
+      dockerfile: Dockerfile
+    env_file: ./payment-service/.env
+    environment:
+      DATABASE_URL: postgres://postgres:123@postgres-payments:5432/payments_db?sslmode=disable
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+    ports:
+      - "8081:8081"
+      - "9091:9091"
+    depends_on:
+      postgres-payments:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  order-service:
+    build:
+      context: ./order-service
+      dockerfile: Dockerfile
+    env_file: ./order-service/.env
+    environment:
+      DATABASE_URL: postgres://postgres:123@postgres-orders:5432/orders_db?sslmode=disable
+      PAYMENT_GRPC_ADDR: payment-service:9091
+      REDIS_ADDR: redis:6379
+    ports:
+      - "8080:8080"
+      - "9090:9090"
+    depends_on:
+      postgres-orders:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      payment-service:
+        condition: service_started
+
+  notification-service:
+    build:
+      context: ./notification-service
+      dockerfile: Dockerfile
+    env_file: ./notification-service/.env
+    environment:
+      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      REDIS_ADDR: redis:6379
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  orders_data:
+  payments_data:
+  redis_data:
