@@ -60,14 +60,16 @@ func NewRabbitMQPublisher(url string) (*RabbitMQPublisher, error) {
 	}
 
 	if _, err := ch.QueueDeclare(
-		DLQName,
+		QueueName,
 		true,
 		false,
 		false,
 		false,
-		nil,
+		amqp.Table{
+			"x-dead-letter-exchange": DLXName,
+		},
 	); err != nil {
-		return nil, fmt.Errorf("declare dlq: %w", err)
+		return nil, fmt.Errorf("declare queue: %w", err)
 	}
 
 	if err := ch.QueueBind(DLQName, "", DLXName, false, nil); err != nil {

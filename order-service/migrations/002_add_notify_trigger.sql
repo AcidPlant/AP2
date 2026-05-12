@@ -9,7 +9,7 @@ RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
 
-ALTER TABLE orders ADD COLUMN status TEXT DEFAULT 'Pending';
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'Pending';
 
 CREATE TRIGGER order_status_change_trigger
     AFTER UPDATE OF status ON orders
