@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 
 	"payment-service/internal/broker"
 	"payment-service/internal/domain"
@@ -14,6 +15,9 @@ import (
 
 var ErrNotFound = errors.New("payment not found")
 var ErrInvalidRange = errors.New("min_amount cannot be greater than max_amount")
+var ErrSimulatedFailure = errors.New("simulated transient failure")
+
+const failRate = 0.80
 
 type PaymentUseCase interface {
 	Authorize(ctx context.Context, orderID string, amount int64, customerEmail string) (*domain.Payment, error)
@@ -31,6 +35,10 @@ func NewPaymentUseCase(repo repository.PaymentRepository, pub broker.Publisher) 
 }
 
 func (uc *paymentUseCase) Authorize(ctx context.Context, orderID string, amount int64, customerEmail string) (*domain.Payment, error) {
+	if rand.Float64() < failRate {
+		return nil, ErrSimulatedFailure
+	}
+
 	paymentStatus := domain.StatusAuthorized
 	if amount > domain.MaxAmount {
 		paymentStatus = domain.StatusDeclined

@@ -40,6 +40,9 @@ func (s *PaymentGRPCServer) ProcessPayment(ctx context.Context, req *paymentv1.P
 
 	payment, err := s.uc.Authorize(ctx, req.GetOrderId(), req.GetAmount(), customerEmail)
 	if err != nil {
+		if errors.Is(err, usecase.ErrSimulatedFailure) {
+			return nil, status.Error(codes.Unavailable, "transient failure, please retry")
+		}
 		return nil, status.Errorf(codes.Internal, "authorize payment: %v", err)
 	}
 

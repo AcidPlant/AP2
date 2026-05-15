@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	paymentv1 "github.com/AcidPlant/generated-code/payment/v1"
 	"google.golang.org/grpc"
@@ -11,6 +12,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 )
+
+const maxRetry = 5
 
 type PaymentGRPCClient struct {
 	client paymentv1.PaymentServiceClient
@@ -25,19 +28,50 @@ func NewPaymentGRPCClient(grpcAddr string) (*PaymentGRPCClient, error) {
 }
 
 func (c *PaymentGRPCClient) Authorize(ctx context.Context, orderID string, amount int64, customerEmail string) (string, string, error) {
-	md := metadata.Pairs("customer-email", customerEmail)
-	ctx = metadata.NewOutgoingContext(ctx, md)
-
-	resp, err := c.client.ProcessPayment(ctx, &paymentv1.PaymentRequest{
-		OrderId: orderID,
-		Amount:  amount,
-	})
-	if err != nil {
-		st, _ := status.FromError(err)
-		if st.Code() == codes.Unavailable {
-			return "", "", fmt.Errorf("payment service unreachable: %w", err)
-		}
-		return "", "", fmt.Errorf("process payment rpc: %w", err)
+	type result struct {
+		txID   string
+		status string
+		err    error
 	}
-	return resp.GetTransactionId(), resp.GetStatus(), nil
+
+	results := make(chan result, maxRetry)
+
+	md := metadata.Pairs("customer-email", customerEmail)
+	outCtx := metadata.NewOutgoingContext(ctx, md)
+
+	var wg sync.WaitGroup
+	for i := 0; i < maxRetry; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			resp, err := c.client.ProcessPayment(outCtx, &paymentv1.PaymentRequest{
+				OrderId: orderID,
+				Amount:  amount,
+			})
+			if err != nil {
+				st, _ := status.FromError(err)
+				if st.Code() == codes.Unavailable {
+					results <- result{err: fmt.Errorf("payment service unreachable: %w", err)}
+					return
+				}
+				results <- result{err: fmt.Errorf("process payment rpc: %w", err)}
+				return
+			}
+			results <- result{txID: resp.GetTransactionId(), status: resp.GetStatus()}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var lastErr error
+	for r := range results {
+		if r.err == nil {
+			return r.txID, r.status, nil
+		}
+		lastErr = r.err
+	}
+	return "", "", lastErr
 }
